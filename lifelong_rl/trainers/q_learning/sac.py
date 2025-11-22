@@ -209,41 +209,16 @@ class SACTrainer(TorchTrainer):
             if self.use_density_penalty and self.density_ucb_ratio > 0:
                 with torch.no_grad():
                     ensemble_q = self.target_qfs(next_obs, new_next_actions).squeeze(-1)
-                    ucb_next = ensemble_q.std(dim=0)  # 内部不确定性 sigma(s,a)
-                    
-                    # 1. 去掉减均值操作，保留绝对大小
-                    # 2. 引入系数让两者量纲大致匹配 (需要在超参里调节，或者预估一个 scale)
-                    # 假设 Q 值的 std 通常在 [0, 10] 之间，NLL 在 [0, 5] 之间
-                    
-                    # 您可以使用一个系数 alpha 来平衡它们
-                    # term_uncertainty = ucb_next  # 或者乘以一个系数
-                    
+                    ucb_next = ensemble_q.std(dim=0)
+                    weight = self.density_base_weight_schedule.value(self._num_train_steps)
+                    penalty = weight * self.density_ucb_ratio * ucb_next
                     if self.density_model is not None:
                         nll = -self.density_model.log_prob(new_next_actions, next_obs)
                         nll = nll.clamp(self.density_nll_clip_min, self.density_nll_clip_max)
-                        
-                        # 如果您发现 nll 的数值通常比 ucb 大很多，可以除以一个常数
-                        # 例如：normalized_density = nll * 0.5 
-                        term_uncertainty = ucb_next 
-                        term_density = nll 
-
-                        # 您可能需要调节这个 scale，让它们处于同一数量级
-                        # 比如通过打印日志观察两者的 mean 值
-                        # 实现 Max 互补逻辑
-                        # 只有当两者都低时，Penalty 才低
-                        max_uncertainty = torch.max(term_uncertainty, term_density)
-                        # Base weight 控制整体惩罚力度
-                        penalty = weight * max_uncertainty
-                        
-                        # Log 原始值以便调试
+                        penalty = penalty * nll
                         density_logs['density_nll_mean'] = nll.mean().item()
-                        density_logs['density_nll_std'] = nll.std().item() # 观察一下方差
-                    else:
-                        penalty = weight * ucb_next
-                    
                     target_q_values = target_q_values - penalty.unsqueeze(-1)
                     density_logs['density_ucb'] = ucb_next.mean().item()
-                    density_logs['normalized_uncertainty'] = normalized_uncertainty.mean().item()
                     density_logs['density_penalty'] = penalty.mean().item()
         else:
             # if self.max_q_backup
